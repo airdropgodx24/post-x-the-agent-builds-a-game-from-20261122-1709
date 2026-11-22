@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Neon Snake — one prompt, one game</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    background: #050510;
+    color: #e8fff2;
+    font-family: "Courier New", ui-monospace, monospace;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    overflow: hidden;
+  }
+  h1 {
+    font-size: 34px;
+    letter-spacing: 6px;
+    color: #39ff88;
+    text-shadow: 0 0 12px #39ff88, 0 0 42px #39ff88;
+    margin-bottom: 6px;
+  }
+  .sub {
+    font-size: 14px;
+    letter-spacing: 2px;
+    color: #7df9ff;
+    text-shadow: 0 0 10px #7df9ff;
+    margin-bottom: 14px;
+  }
+  #hud {
+    width: 640px;
+    max-width: 94vw;
+    display: flex;
+    justify-content: space-between;
+    font-size: 20px;
+    font-weight: bold;
+    margin-bottom: 8px;
+  }
+  #score { color: #ffe14d; text-shadow: 0 0 10px #ffe14d; }
+  #best { color: #ff5df2; text-shadow: 0 0 10px #ff5df2; }
+  #speed { color: #7df9ff; text-shadow: 0 0 10px #7df9ff; }
+  canvas {
+    display: block;
+    width: 640px;
+    height: 480px;
+    max-width: 94vw;
+    max-height: 66vh;
+    background: #070718;
+    border: 2px solid #39ff88;
+    border-radius: 10px;
+    box-shadow: 0 0 24px rgba(57, 255, 136, 0.45), inset 0 0 60px rgba(57, 255, 136, 0.08);
+  }
+  .hint {
+    margin-top: 12px;
+    font-size: 14px;
+    color: #9aa3c7;
+    letter-spacing: 1px;
+    text-align: center;
+  }
+  .hint b { color: #e8fff2; }
+</style>
+</head>
+<body>
+  <h1>NEON SNAKE</h1>
+  <div class="sub">ONE PROMPT &middot; ONE GAME &middot; BUILT BY AN AI AGENT</div>
+  <div id="hud">
+    <span id="score">SCORE 0</span>
+    <span id="speed">SPEED 1</span>
+    <span id="best">BEST 0</span>
+  </div>
+  <canvas id="game" width="640" height="480"></canvas>
+  <div class="hint"><b>Arrow keys</b> steer &middot; eat the glowing orbs &middot; walls and your own tail end the run &middot; <b>Enter</b> restarts</div>
+
+<script>
+(function () {
+  "use strict";
+
+  var canvas = document.getElementById("game");
+  var ctx = canvas.getContext("2d");
+  var scoreEl = document.getElementById("score");
+  var bestEl = document.getElementById("best");
+  var speedEl = document.getElementById("speed");
+
+  var CELL = 20;
+  var COLS = canvas.width / CELL;   // 32
+  var ROWS = canvas.height / CELL;  // 24
+  var BASE_STEP = 140;              // ms per move at speed 1
+  var MIN_STEP = 70;                // fastest step, reached as score grows
+
+  var snake, dir, pendingDir, orb, score, state, stepMs, lastTick, growBy;
+  var best = 0; // best score across runs in this page session; reset() must not clear it
+
+  function reset() {
+    var midX = Math.floor(COLS / 2);
+    var midY = Math.floor(ROWS / 2);
+    snake = [
+      { x: midX, y: midY },
+      { x: midX - 1, y: midY },
+      { x: midX - 2, y: midY }
+    ];
+    dir = { x: 1, y: 0 };
+    pendingDir = dir;
+    orb = null;
+    score = 0;
+    growBy = 0;
+    stepMs = BASE_STEP;
+    state = "ready"; // ready | playing | over
+    spawnOrb();
+    updateHud();
+  }
+
+  function cellFree(x, y) {
+    for (var i = 0; i < snake.length; i++) {
+      if (snake[i].x === x && snake[i].y === y) return false;
+    }
+    return true;
+  }
+
+  function spawnOrb() {
+    var x, y, tries = 0;
+    do {
+      x = Math.floor(Math.random() * COLS);
+      y = Math.floor(Math.random() * ROWS);
+      tries++;
+    } while (!cellFree(x, y) && tries < 500);
+    orb = { x: x, y: y, hue: Math.random() < 0.5 ? "#ff5df2" : "#ffe14d" };
+  }
+
+  function updateHud() {
+    scoreEl.textContent = "SCORE " + score;
+    bestEl.textContent = "BEST " + best;
+    speedEl.textContent = "SPEED " + (1 + Math.floor(score / 5));
+  }
+
+  function tick(now) {
+    requestAnimationFrame(tick);
+    if (state !== "playing") {
+      draw();
+      return;
+    }
+    if (now - lastTick < stepMs) {
+      draw();
+      return;
+    }
+    lastTick = now;
+    dir = pendingDir;
+    var head = { x: snake[0].x + dir.x, y: snake[0].y + dir.y };
+
+    // Walls end the run.
+    if (head.x < 0 || head.x >= COLS || head.y < 0 || head.y >= ROWS) {
+      return gameOver();
+    }
+    // Your own tail ends the run (the tail cell being vacated this move is safe).
+    var body = growBy > 0 ? snake : snake.slice(0, snake.length - 1);
+    for (var i = 0; i < body.length; i++) {
+      if (body[i].x === head.x && body[i].y === head.y) {
+        return gameOver();
+      }
+    }
+
+    snake.unshift(head);
+    if (head.x === orb.x && head.y === orb.y) {
+      score++;
+      if (score > best) best = score;
+      growBy += 2; // eating grows the snake by two segments
+      stepMs = Math.max(MIN_STEP, BASE_STEP - score * 4);
+      spawnOrb();
+      updateHud();
+    }
+    if (growBy > 0) {
+      growBy--;
+    } else {
+      snake.pop();
+    }
+    draw();
+  }
+
+  function gameOver() {
+    state = "over";
+    draw();
+  }
+
+  function glowCircle(px, py, r, color) {
+    ctx.save();
+    ctx.shadowColor = color;
+    ctx.shadowBlur = 18;
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.arc(px, py, r, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  function draw() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    // Faint grid.
+    ctx.strokeStyle = "rgba(125, 249, 255, 0.07)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (var gx = 0; gx <= COLS; gx++) {
+      ctx.moveTo(gx * CELL, 0);
+      ctx.lineTo(gx * CELL, canvas.height);
+    }
+    for (var gy = 0; gy <= ROWS; gy++) {
+      ctx.moveTo(0, gy * CELL);
+      ctx.lineTo(canvas.width, gy * CELL);
+    }
+    ctx.stroke();
+
+    // Glowing orb.
+    if (orb) {
+      var pulse = 7 + Math.sin(Date.now() / 180) * 2;
+      glowCircle(orb.x * CELL + CELL / 2, orb.y * CELL + CELL / 2, pulse, orb.hue);
+      ctx.fillStyle = "#ffffff";
+      ctx.beginPath();
+      ctx.arc(orb.x * CELL + CELL / 2, orb.y * CELL + CELL / 2, 2.5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // Snake: bright head, fading neon body.
+    for (var i = snake.length - 1; i >= 0; i--) {
+      var seg = snake[i];
+      var cx = seg.x * CELL + CELL / 2;
+      var cy = seg.y * CELL + CELL / 2;
+      if (i === 0) {
+        glowCircle(cx, cy, 9, "#39ff88");
+        ctx.fillStyle = "#050510";
+        ctx.beginPath();
+        ctx.arc(cx - 3, cy - 3, 2, 0, Math.PI * 2);
+        ctx.arc(cx + 3, cy - 3, 2, 0, Math.PI * 2);
+        ctx.fill();
+      } else {
+        var fade = 1 - i / snake.length;
+        ctx.save();
+        ctx.shadowColor = "#39ff88";
+        ctx.shadowBlur = 10;
+        ctx.fillStyle = i % 2 === 0 ? "#19c96b" : "#2ee6a8";
+        ctx.globalAlpha = 0.45 + fade * 0.55;
+        ctx.beginPath();
+        ctx.arc(cx, cy, 8, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      }
+    }
+
+    if (state === "ready") {
+      overlay("NEON SNAKE", "Press an arrow key to start");
+    } else if (state === "over") {
+      overlay("GAME OVER", "Score " + score + "  ·  Best " + best + "  ·  Press Enter to play again");
+    }
+  }
+
+  function overlay(title, line) {
+    ctx.save();
+    ctx.fillStyle = "rgba(5, 5, 16, 0.72)";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.textAlign = "center";
+    ctx.fillStyle = "#39ff88";
+    ctx.shadowColor = "#39ff88";
+    ctx.shadowBlur = 18;
+    ctx.font = "bold 44px 'Courier New', monospace";
+    ctx.fillText(title, canvas.width / 2, canvas.height / 2 - 12);
+    ctx.shadowBlur = 8;
+    ctx.fillStyle = "#e8fff2";
+    ctx.font = "bold 19px 'Courier New', monospace";
+    ctx.fillText(line, canvas.width / 2, canvas.height / 2 + 30);
+    ctx.restore();
+  }
+
+  var KEYS = {
+    ArrowUp: { x: 0, y: -1 }, KeyW: { x: 0, y: -1 },
+    ArrowDown: { x: 0, y: 1 }, KeyS: { x: 0, y: 1 },
+    ArrowLeft: { x: -1, y: 0 }, KeyA: { x: -1, y: 0 },
+    ArrowRight: { x: 1, y: 0 }, KeyD: { x: 1, y: 0 }
+  };
+
+  document.addEventListener("keydown", function (e) {
+    if (e.code === "Enter" || e.code === "Space") {
+      if (state === "over") {
+        reset();
+        state = "playing";
+        lastTick = performance.now();
+      } else if (state === "ready") {
+        state = "playing";
+        lastTick = performance.now();
+      }
+      e.preventDefault();
+      return;
+    }
+    var next = KEYS[e.code];
+    if (!next) return;
+    e.preventDefault();
+    // Never reverse straight into yourself.
+    if (next.x === -dir.x && next.y === -dir.y) return;
+    pendingDir = next;
+    if (state === "ready") {
+      state = "playing";
+      lastTick = performance.now();
+    }
+  });
+
+  // Small read-only handle so an automated capture can steer the snake.
+  window.NEON_SNAKE = {
+    state: function () {
+      return {
+        state: state,
+        score: score,
+        best: best,
+        head: snake[0],
+        dir: dir,
+        orb: orb,
+        length: snake.length
+      };
+    }
+  };
+
+  reset();
+  requestAnimationFrame(function (now) {
+    lastTick = now;
+    requestAnimationFrame(tick);
+  });
+})();
+</script>
+</body>
+</html>
